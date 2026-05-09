@@ -29,6 +29,83 @@ MeetMind-Unified/
 - 🔍 全局搜索
 - 🔐 Firebase 认证和存储
 
+## 系统架构图
+
+```mermaid
+flowchart LR
+	subgraph FE[Frontend - React + Vite]
+		UI[MeetingRoom / Dashboard / ProjectDetail]
+		WSClient[WebSocket Client]
+		APIClient[HTTP Client]
+	end
+
+	subgraph BE[Backend - FastAPI + WebSocket]
+		WSServer[/websocket_server.py/]
+		Core[CoreAgent]
+		ASR[SpeechRecognitionAgent\nDashScope ASR]
+		Record[MeetingRecordAgent]
+		Analysis[TextAnalysisAgent]
+		Entity[EntityExtractionAgent]
+	end
+
+	subgraph Cloud[Cloud Services]
+		FB[(Firebase Auth + Firestore + Storage)]
+		GEM[Gemini API]
+		DS[DashScope API]
+	end
+
+	UI --> WSClient --> WSServer
+	UI --> APIClient --> WSServer
+	WSServer --> Core
+	Core --> ASR --> DS
+	Core --> Record
+	Core --> Analysis --> GEM
+	Core --> Entity
+	UI --> FB
+```
+
+## 编排说明（Orchestration）
+
+- **编排中心**：`CoreAgent`
+- **协作模式**：Hub-and-Spoke（中心调度） + 局部 Pipeline（实体提取 → 任务写入）
+- **关键流程**：
+	1. 前端点击 `Start Session` 调用 `POST /start`
+	2. 后端启动 `CoreAgent`，打开麦克风流并连接 ASR
+	3. 每条识别结果通过 WebSocket 推送到前端
+	4. 按节奏触发摘要、关键词、实体抽取
+	5. 前端点击 `Finish` 调用 `POST /stop`，后端返回 summary + transcript
+	6. 前端写入 Firestore（meeting + actionItems）形成“会议记忆”
+
+## 数据流图
+
+```mermaid
+sequenceDiagram
+	participant U as User
+	participant FE as Frontend
+	participant WS as WebSocket
+	participant API as FastAPI
+	participant CORE as CoreAgent
+	participant ASR as DashScope ASR
+	participant GEM as Gemini
+	participant DB as Firestore
+
+	U->>FE: Click Start Session
+	FE->>API: POST /start
+	API->>CORE: start()
+	CORE->>ASR: stream audio
+	ASR-->>CORE: partial/final transcript
+	CORE-->>WS: transcript / status / summary_update
+	WS-->>FE: realtime UI updates
+
+	U->>FE: Click Finish
+	FE->>API: POST /stop
+	API->>CORE: stop()
+	CORE->>GEM: generate summary
+	GEM-->>CORE: summary text
+	API-->>FE: summary + transcript
+	FE->>DB: save meeting + action items
+```
+
 ## 快速开始
 
 ### 环境要求
