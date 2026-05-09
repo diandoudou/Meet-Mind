@@ -1,0 +1,135 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string
+    //   - email: string (required, format: email)
+    //   - photoURL: string
+    //   - role: string (enum: ['admin', 'researcher'])
+    //   - createdAt: number (required)
+    //
+    // Collection: projects
+    // Document ID: projectId
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required, size < 100)
+    //   - description: string (size < 1000)
+    //   - color: string
+    //   - ownerUid: string (required, immutable)
+    //   - members: list (strings, size < 50)
+    //   - createdAt: number (required, immutable)
+    //
+    // Subcollection: /projects/{projectId}/meetings
+    // Fields:
+    //   - id: string (required)
+    //   - projectId: string (required, immutable)
+    //   - title: string (required, size < 200)
+    //   - date: number (required)
+    //   - summary: string (size < 10000)
+    //   - transcript: list (objects)
+    //
+    // Subcollection: /projects/{projectId}/actionItems
+    // Fields:
+    //   - id: string (required)
+    //   - projectId: string (required, immutable)
+    //   - meetingId: string (required, immutable)
+    //   - task: string (required, size < 500)
+    //   - assignee: string (size < 100)
+    //   - deadline: number
+    //   - status: string (enum: ['pending', 'completed', 'overdue'])
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "diandoudou09@gmail.com" && request.auth.token.email_verified == true));
+    }
+    
+    function isProjectMember(projectId) {
+      let project = get(/databases/$(database)/documents/projects/$(projectId)).data;
+      return isAuthenticated() && (project.ownerUid == request.auth.uid || request.auth.uid in project.members);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Domain Validators
+    function isValidUser(data) {
+      return data.uid is string && data.uid.size() > 0 &&
+             isValidEmail(data.email) &&
+             data.role in ['admin', 'researcher'];
+    }
+
+    function isValidProject(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.ownerUid is string &&
+             data.members is list && data.members.size() < 50;
+    }
+
+    function isValidMeeting(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.projectId is string;
+    }
+
+    function isValidActionItem(data) {
+      return data.task is string && data.task.size() > 0 && data.task.size() < 500 &&
+             data.status in ['pending', 'completed', 'overdue'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role == 'researcher' || isAdmin());
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data) && (request.resource.data.role == resource.data.role || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /projects/{projectId} {
+      allow read: if isProjectMember(projectId) || isAdmin();
+      allow create: if isAuthenticated() && isValidProject(request.resource.data) && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if (isProjectMember(projectId) || isAdmin()) && isValidProject(request.resource.data) && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if (isAuthenticated() && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerUid == request.auth.uid) || isAdmin();
+      
+      match /meetings/{meetingId} {
+        allow read: if isProjectMember(projectId) || isAdmin();
+        allow create, update: if (isProjectMember(projectId) || isAdmin()) && isValidMeeting(request.resource.data);
+        allow delete: if isProjectMember(projectId) || isAdmin();
+      }
+
+      match /actionItems/{actionItemId} {
+        allow read: if isProjectMember(projectId) || isAdmin();
+        allow create, update: if (isProjectMember(projectId) || isAdmin()) && isValidActionItem(request.resource.data);
+        allow delete: if isProjectMember(projectId) || isAdmin();
+      }
+    }
+  }
+}

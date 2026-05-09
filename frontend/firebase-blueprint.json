@@ -1,0 +1,96 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and role management",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "researcher"] },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "An academic project space",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "color": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "members": { 
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "name", "ownerUid", "createdAt"]
+    },
+    "Meeting": {
+      "title": "Meeting",
+      "description": "A meeting session within a project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "number" },
+        "summary": { "type": "string" },
+        "transcript": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "speaker": { "type": "string" },
+              "text": { "type": "string" },
+              "timestamp": { "type": "number" },
+              "language": { "type": "string" },
+              "isCommand": { "type": "boolean" }
+            }
+          }
+        }
+      },
+      "required": ["id", "projectId", "title", "date"]
+    },
+    "ActionItem": {
+      "title": "Action Item",
+      "description": "A task assigned during a meeting",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "meetingId": { "type": "string" },
+        "task": { "type": "string" },
+        "assignee": { "type": "string" },
+        "deadline": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "completed", "overdue"] },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "projectId", "meetingId", "task", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Store user profiles"
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Main project document"
+    },
+    "/projects/{projectId}/meetings/{meetingId}": {
+      "schema": "Meeting",
+      "description": "Meetings for the project"
+    },
+    "/projects/{projectId}/actionItems/{actionItemId}": {
+      "schema": "ActionItem",
+      "description": "Action items for the project"
+    }
+  }
+}

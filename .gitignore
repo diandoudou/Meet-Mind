@@ -1,0 +1,79 @@
+# MeetMind Unified - .gitignore
+
+# ==================== Python ====================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+backend/.venv
+backend/.venv/
+backend/venv/
+backend/env/
+/.venv/
+
+# Python specific
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ==================== Node.js ====================
+# Dependencies
+frontend/node_modules/
+node_modules/
+
+# Build outputs
+frontend/dist/
+frontend/build/
+
+# ==================== Environment Files ====================
+# Keep .env.example, ignore actual .env
+.env
+backend/.env
+frontend/.env
+
+# ==================== IDE ====================
+# VSCode
+.vscode/
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# ==================== macOS ====================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ==================== Logs ====================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==================== Process IDs ====================
+.backend.pid
+.frontend.pid
+
+# ==================== Data Files ====================
+backend/data/uploaded_pdfs/*.pdf
+
+# ==================== Firebase ====================
+.firebase/
+firebase-debug.log
+
+# ==================== Temporary Files ====================
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ==================== Testing ====================
+.coverage
+htmlcov/
+.pytest_cache/

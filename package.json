@@ -1,0 +1,30 @@
+{
+  "name": "meetmind-unified",
+  "version": "1.0.0",
+  "description": "MeetMind - AI-Powered Meeting Assistant (Unified Frontend + Backend)",
+  "scripts": {
+    "start": "./start.sh",
+    "stop": "./stop.sh",
+    "dev": "npm run start",
+    "backend": "cd backend && source .venv/bin/activate && python src/websocket_server.py",
+    "frontend": "cd frontend && npm run dev",
+    "install:all": "cd backend && pip install -r requirements.txt && cd ../frontend && npm install",
+    "logs:backend": "tail -f logs/backend.log",
+    "logs:frontend": "tail -f logs/frontend.log"
+  },
+  "keywords": [
+    "meeting",
+    "assistant",
+    "AI",
+    "transcription",
+    "voice-recognition",
+    "gemini",
+    "dashscope"
+  ],
+  "author": "MeetMind Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/meetmind-unified"
+  }
+}

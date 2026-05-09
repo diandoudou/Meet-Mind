@@ -1,0 +1,6 @@
+{
+  "name": "MeetMind - Student Intelligence Hub",
+  "description": "The 'Second Brain' for academic collaboration. Automates project workflows with contextual AI briefings, bilingual transcription, and smart task distribution.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["Contextual Briefing", "Bilingual Recording Copilot", "Smart Action Center", "Knowledge Retrieval Chat"]
+}
