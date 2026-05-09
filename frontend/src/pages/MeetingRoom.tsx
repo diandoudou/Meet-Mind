@@ -334,10 +334,10 @@ export default function MeetingRoom() {
               <button
                 onClick={() => navigate(projectId ? `/project/${projectId}` : '/')}
                 className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-academic-900 transition-all text-xs font-bold"
-                title="Back to project"
+                title="返回项目页"
               >
                 <ArrowLeft size={14} />
-                Back
+                返回
               </button>
               <div className="space-y-1">
                 <div className="flex items-center gap-3">
