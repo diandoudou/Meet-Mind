@@ -131,24 +131,31 @@ class CoreAgent:
             # 重新抛出异常,让调用方(如GUI)能够捕获和处理
             raise
     
-    def stop(self):
+    def stop(self) -> Optional[str]:
         """
         停止会议助手
+
+        Returns:
+            会中持久化的 WAV 路径（若有），供 WhisperX/pyannote 离线分离
         """
         if not self.is_running:
-            return
+            return self.get_saved_audio_path()
         
         self.is_running = False
         self.stop_analysis_thread = True
         
-        # 停止语音识别
-        self.speech_recognition_agent.stop_recognition()
+        # 停止语音识别并落盘音频
+        audio_path = self.speech_recognition_agent.stop_recognition()
         
         # 等待分析线程结束
         if self.analysis_thread and self.analysis_thread.is_alive():
             self.analysis_thread.join(timeout=5)
         
         print("会议助手已停止")
+        return audio_path
+
+    def get_saved_audio_path(self) -> Optional[str]:
+        return self.speech_recognition_agent.get_saved_audio_path()
     
     def _handle_recognized_text(self, text: str):
         """

@@ -1,0 +1,27 @@
+fastapi>=0.115.0
+uvicorn>=0.32.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+dashscope>=1.20.0
+jieba>=0.42.1
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-experimental>=0.3.0
+langgraph>=0.2.0
+chromadb>=0.5.0
+pypdf>=4.0.0
+pymilvus>=2.4.0
+python-multipart>=0.0.9
+# Chinese-CLIP multimodal image channel (optional but recommended for image_vector)
+transformers>=4.40.0
+torch>=2.0.0
+Pillow>=10.0.0
+# LlamaIndex RAG evaluation
+llama-index-core>=0.12.0
+llama-index-llms-google-genai>=0.1.0
+# Optional research PDF parser (heavy). Without it, pypdf heuristics are used.
+# marker-pdf>=1.0.0
+# Offline speaker diarization (heavy; install when enabling DIARIZATION_OFFLINE_ENABLED)
+# whisperx>=3.1.0
+# pyannote.audio>=3.1.0
+# Accept pyannote model terms on Hugging Face and set HF_TOKEN

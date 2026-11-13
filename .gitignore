@@ -59,6 +59,10 @@ yarn-error.log*
 
 # ==================== Data Files ====================
 backend/data/uploaded_pdfs/*.pdf
+backend/data/meeting_audio/
+backend/data/chroma/
+backend/data/milvus/
+backend/data/simple_store/
 
 # ==================== Firebase ====================
 .firebase/

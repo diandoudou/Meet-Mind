@@ -1,5 +1,10 @@
 import os
-from typing import Optional, Callable
+import threading
+import time
+import wave
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, List, Optional
 
 import dashscope
 import pyaudio
@@ -8,6 +13,13 @@ from dashscope.audio.asr import VocabularyService
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _audio_persist_dir() -> Path:
+    default = Path(__file__).resolve().parents[2] / "data" / "meeting_audio"
+    path = Path(os.getenv("MEETING_AUDIO_DIR", str(default)))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class SpeechRecognitionAgent:
@@ -54,6 +66,17 @@ class SpeechRecognitionAgent:
         # 热词表相关属性
         self.vocabulary_service = None
         self.vocabulary_id = None
+
+        # 原始音频缓存（供会后 WhisperX + pyannote）
+        self._audio_frames: List[bytes] = []
+        self._audio_lock = threading.Lock()
+        self.last_saved_audio_path: Optional[str] = None
+        self.persist_audio = os.getenv("MEETING_AUDIO_PERSIST", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         self.mic = None
         self.stream = None
@@ -185,10 +208,17 @@ class SpeechRecognitionAgent:
         """
         开始音频流传输
         """
+        with self._audio_lock:
+            self._audio_frames = []
+            self.last_saved_audio_path = None
+
         try:
             while self.is_recording:
                 if self.stream:
                     data = self.stream.read(self.block_size, exception_on_overflow=False)
+                    if self.persist_audio and data:
+                        with self._audio_lock:
+                            self._audio_frames.append(data)
                     self.recognition.send_audio_frame(data)
                 else:
                     break
@@ -196,14 +226,13 @@ class SpeechRecognitionAgent:
             print(f"音频流传输错误: {e}")
             self.stop_recognition()
 
-    def stop_recognition(self):
-        """
-        停止语音识别
-        """
+    def stop_recognition(self) -> Optional[str]:
+        """停止语音识别，并可选写出 WAV 供离线说话人分离。"""
         if not self.is_recording:
-            return
+            return self.last_saved_audio_path
 
         self.is_recording = False
+        time.sleep(0.15)
 
         # 停止识别服务
         if self.recognition:
@@ -230,6 +259,42 @@ class SpeechRecognitionAgent:
 
         # 删除热词表
         self._delete_vocabulary()
+
+        saved = self.save_recording_wav() if self.persist_audio else None
+        if saved:
+            print(f'[音频] 已保存会议录音: {saved}')
+        return saved
+
+    def save_recording_wav(self, output_path: Optional[str] = None) -> Optional[str]:
+        """将缓存的 PCM 帧写成 16k mono WAV。"""
+        with self._audio_lock:
+            frames = list(self._audio_frames)
+
+        if not frames:
+            print("[音频] 无缓存帧，跳过 WAV 保存")
+            return None
+
+        if output_path:
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = _audio_persist_dir() / f"meeting_{stamp}.wav"
+
+        try:
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(2)
+                wf.setframerate(self.sample_rate)
+                wf.writeframes(b"".join(frames))
+            self.last_saved_audio_path = str(path)
+            return self.last_saved_audio_path
+        except Exception as exc:
+            print(f"[音频] 保存 WAV 失败: {exc}")
+            return None
+
+    def get_saved_audio_path(self) -> Optional[str]:
+        return self.last_saved_audio_path
 
     def _signal_handler(self, sig, frame):
         """

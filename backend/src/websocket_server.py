@@ -5,7 +5,14 @@ MeetingAssistant WebSocket Server
 Endpoints:
   WS   ws://localhost:8765/ws       - 实时接收转录消息
   POST http://localhost:8765/start  - 开始录音
-  POST http://localhost:8765/stop   - 停止录音，返回总结和转录记录
+  POST http://localhost:8765/stop   - 停止录音，WhisperX/pyannote 离线分离 + LangGraph 并行生成摘要与待办
+  POST http://localhost:8765/api/diarize - 对已有 WAV 运行离线说话人分离
+  POST http://localhost:8765/api/chat - 后端 AI 对话（Gemini 密钥仅服务端）
+  POST http://localhost:8765/api/rag/search - 知识库检索
+  POST http://localhost:8765/api/rag/chat - RAG 问答（带 citations）
+  POST http://localhost:8765/api/rag/index/meeting - 手动索引会议
+  POST http://localhost:8765/api/rag/index/pdf - 索引 PDF 文本（兼容）
+  POST http://localhost:8765/api/rag/index/pdf-file - Marker/结构感知索引科研 PDF
   GET  http://localhost:8765/status - 获取当前状态
 """
 
@@ -29,7 +36,7 @@ _root_env = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
 load_dotenv(_backend_env)
 load_dotenv(_root_env)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
@@ -43,6 +50,13 @@ class StatusResponse(BaseModel):
 class StartResponse(BaseModel):
     status: str
 
+class StopRequest(BaseModel):
+    project_id: str = ""
+    meeting_id: str = ""
+    owner_uid: str = ""
+    meeting_title: str = ""
+
+
 class TranscriptEntry(BaseModel):
     speaker: str
     text: str
@@ -52,7 +66,37 @@ class TranscriptEntry(BaseModel):
 class StopResponse(BaseModel):
     status: str
     summary: str
+    summary_structured: dict | None = None
+    action_items: list[dict] = Field(default_factory=list)
     transcript: list[TranscriptEntry]
+    errors: list[str] = Field(default_factory=list)
+    audio_path: str = ""
+    diarization_engine: str = ""
+    diarization_meta: dict = Field(default_factory=dict)
+
+
+class DiarizeRequest(BaseModel):
+    audio_path: str
+    language: str = ""
+
+
+class DiarizeResponse(BaseModel):
+    status: str
+    engine: str = ""
+    language: str = ""
+    transcript: list[TranscriptEntry] = Field(default_factory=list)
+    formatted_transcript: str = ""
+    meta: dict = Field(default_factory=dict)
+    error: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str
+    context: str = ""
+
+
+class ChatResponse(BaseModel):
+    reply: str
 
 class TermItem(BaseModel):
     word: str
@@ -79,6 +123,29 @@ class ClearPdfsResponse(BaseModel):
 
 from agents.core_agent import CoreAgent
 from agents.entity_extraction_agent import EntityExtractionAgent
+from api.chat_service import generate_chat_reply
+from api.rag_routes import (
+    RagChatRequest,
+    RagChatResponse,
+    RagIndexMeetingRequest,
+    RagIndexPdfRequest,
+    RagIndexResponse,
+    RagSearchRequest,
+    RagSearchResponse,
+    handle_index_meeting,
+    handle_index_pdf,
+    handle_index_research_pdf,
+    handle_rag_chat,
+    handle_rag_search,
+)
+from diarization import (
+    is_offline_diarization_enabled,
+    merge_diarization_into_live_transcript,
+    run_whisperx_pyannote,
+    whisperx_available,
+)
+from graph.meeting_graph import run_post_meeting_pipeline
+from rag.indexer import index_meeting
 from rag.pdf_term_extractor import extract_terms_from_pdf, terms_to_keywords
 
 # ──────────────────────────── Global State ────────────────────────────
@@ -288,17 +355,28 @@ async def start_recording():
 
 
 @app.post("/stop", response_model=StopResponse)
-async def stop_recording():
+async def stop_recording(request: StopRequest | None = None):
     global core_agent
 
+    payload = request or StopRequest()
+
     if not core_agent or not core_agent.is_running:
-        return {"status": "not_running", "summary": "", "transcript": []}
+        return {
+            "status": "not_running",
+            "summary": "",
+            "summary_structured": None,
+            "action_items": [],
+            "transcript": [],
+            "errors": [],
+            "audio_path": "",
+            "diarization_engine": "",
+            "diarization_meta": {},
+        }
 
-    core_agent.stop()
+    audio_path = core_agent.stop() or ""
 
-    # 获取完整转录记录（使用真实姓名）
     records = core_agent.meeting_record_agent.records
-    transcript_entries = [
+    live_transcript_entries = [
         {
             "speaker": core_agent.meeting_record_agent.get_speaker_display_name(r['speaker_label']),
             "text": r["text"],
@@ -308,21 +386,230 @@ async def stop_recording():
         for r in records
     ]
 
-    # 生成 AI 总结
-    summary = ""
-    try:
-        summary = core_agent.meeting_record_agent.generate_summary()
-    except Exception as e:
-        summary = f"总结生成失败: {e}"
-        print(f"[Error] 总结生成失败: {e}")
+    transcript_entries = live_transcript_entries
+    transcript_text = core_agent.meeting_record_agent.get_formatted_transcript()
+    diarization_engine = ""
+    diarization_meta: dict = {}
+    meeting_id = payload.meeting_id or f"mtg-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    project_id = payload.project_id or ""
 
-    broadcast_sync({"type": "status", "message": "录音已停止，正在处理..."})
+    summary = ""
+    summary_structured = None
+    action_items: list[dict] = []
+    errors: list[str] = []
+
+    broadcast_sync({"type": "status", "message": "录音已停止，正在离线说话人分离..."})
+
+    if audio_path and is_offline_diarization_enabled():
+        try:
+            diarized = await asyncio.to_thread(run_whisperx_pyannote, audio_path)
+            diarization_engine = diarized.engine
+            diarization_meta = diarized.meta or {}
+            if diarized.error:
+                errors.append(f"Diarization: {diarized.error}")
+            merged = merge_diarization_into_live_transcript(live_transcript_entries, diarized)
+            if merged:
+                transcript_entries = [
+                    {
+                        "speaker": e.get("speaker", "SPEAKER_00"),
+                        "text": e.get("text", ""),
+                        "timestamp": str(e.get("timestamp", "")),
+                        "language": e.get("language", "mixed"),
+                    }
+                    for e in merged
+                    if (e.get("text") or "").strip()
+                ]
+                transcript_text = diarized.to_formatted_text() or "\n".join(
+                    f"{e['speaker']}: {e['text']}" for e in transcript_entries
+                )
+                broadcast_sync({
+                    "type": "diarization_done",
+                    "engine": diarization_engine,
+                    "segments": len(transcript_entries),
+                    "meta": diarization_meta,
+                })
+        except Exception as diar_exc:
+            errors.append(f"Diarization failed: {diar_exc}")
+            print(f"[Diarization] {diar_exc}")
+    elif not audio_path:
+        print("[Diarization] skip: no persisted audio")
+    elif not whisperx_available():
+        print("[Diarization] skip: whisperx not installed")
+
+    broadcast_sync({"type": "status", "message": "正在生成摘要与待办..."})
+
+    try:
+        graph_result = await run_post_meeting_pipeline({
+            "meeting_id": meeting_id,
+            "project_id": project_id,
+            "transcript_text": transcript_text,
+            "errors": [],
+        })
+        summary = graph_result.get("summary_text", "") or ""
+        summary_structured = graph_result.get("summary_structured")
+        action_items = graph_result.get("action_items", []) or []
+        errors.extend(graph_result.get("errors", []) or [])
+    except Exception as e:
+        error_msg = f"Post-meeting graph failed: {e}"
+        print(f"[Error] {error_msg}")
+        errors.append(error_msg)
+        try:
+            summary = core_agent.meeting_record_agent.generate_summary()
+        except Exception as fallback_error:
+            summary = f"总结生成失败: {fallback_error}"
+            errors.append(str(fallback_error))
+
+    if payload.owner_uid and project_id and transcript_entries:
+        meeting_title = payload.meeting_title or f"Meeting {meeting_id}"
+
+        def _index_background():
+            try:
+                index_meeting(
+                    owner_uid=payload.owner_uid,
+                    project_id=project_id,
+                    meeting_id=meeting_id,
+                    meeting_title=meeting_title,
+                    transcript=transcript_entries,
+                    summary_structured=summary_structured,
+                )
+            except Exception as index_error:
+                print(f"[RAG] background index failed: {index_error}")
+
+        threading.Thread(target=_index_background, daemon=True).start()
 
     return {
         "status": "stopped",
         "summary": summary,
-        "transcript": transcript_entries
+        "summary_structured": summary_structured,
+        "action_items": action_items,
+        "transcript": transcript_entries,
+        "errors": errors,
+        "audio_path": audio_path,
+        "diarization_engine": diarization_engine,
+        "diarization_meta": diarization_meta,
     }
+
+
+@app.post("/api/diarize", response_model=DiarizeResponse)
+async def diarize_audio(request: DiarizeRequest):
+    """对已有 WAV 运行 WhisperX + pyannote 离线说话人分离。"""
+    if not request.audio_path.strip():
+        raise HTTPException(status_code=400, detail="audio_path is required")
+    if not Path(request.audio_path).exists():
+        raise HTTPException(status_code=404, detail=f"audio not found: {request.audio_path}")
+
+    language = request.language.strip() or None
+    result = await asyncio.to_thread(
+        run_whisperx_pyannote,
+        request.audio_path,
+        language=language,
+    )
+    entries = [
+        TranscriptEntry(
+            speaker=e.get("speaker", "SPEAKER_00"),
+            text=e.get("text", ""),
+            timestamp=str(e.get("timestamp", "")),
+            language=e.get("language", result.language or "mixed"),
+        )
+        for e in result.to_transcript_entries()
+    ]
+    return DiarizeResponse(
+        status="ok" if not result.error or entries else "error",
+        engine=result.engine,
+        language=result.language,
+        transcript=entries,
+        formatted_transcript=result.to_formatted_text(),
+        meta=result.meta,
+        error=result.error,
+    )
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_with_assistant(request: ChatRequest):
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="message is required")
+
+    try:
+        reply = generate_chat_reply(request.message.strip(), request.context)
+        return {"reply": reply}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat failed: {e}")
+
+
+@app.post("/api/rag/search", response_model=RagSearchResponse)
+async def rag_search(request: RagSearchRequest):
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="query is required")
+    if not request.owner_uid:
+        raise HTTPException(status_code=400, detail="owner_uid is required")
+    try:
+        return handle_rag_search(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG search failed: {e}")
+
+
+@app.post("/api/rag/chat", response_model=RagChatResponse)
+async def rag_chat_endpoint(request: RagChatRequest):
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="message is required")
+    if not request.owner_uid:
+        raise HTTPException(status_code=400, detail="owner_uid is required")
+    try:
+        return handle_rag_chat(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG chat failed: {e}")
+
+
+@app.post("/api/rag/index/meeting", response_model=RagIndexResponse)
+async def rag_index_meeting(request: RagIndexMeetingRequest):
+    if not request.owner_uid:
+        raise HTTPException(status_code=400, detail="owner_uid is required")
+    try:
+        return handle_index_meeting(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG index meeting failed: {e}")
+
+
+@app.post("/api/rag/index/pdf", response_model=RagIndexResponse)
+async def rag_index_pdf(request: RagIndexPdfRequest):
+    if not request.owner_uid:
+        raise HTTPException(status_code=400, detail="owner_uid is required")
+    try:
+        return handle_index_pdf(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG index pdf failed: {e}")
+
+
+@app.post("/api/rag/index/pdf-file", response_model=RagIndexResponse)
+async def rag_index_pdf_file(
+    file: UploadFile = File(...),
+    owner_uid: str = Form(""),
+    project_id: str = Form(""),
+    file_id: str = Form(""),
+    file_title: str = Form(""),
+):
+    if not owner_uid or not project_id:
+        raise HTTPException(status_code=400, detail="owner_uid and project_id are required")
+
+    filename = file.filename or "upload.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="只支持 PDF 文件")
+
+    resolved_id = file_id or datetime.now().strftime("%Y%m%d%H%M%S")
+    save_path = _PDF_UPLOAD_DIR / f"rag_{resolved_id}_{filename}"
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        return handle_index_research_pdf(
+            owner_uid=owner_uid,
+            project_id=project_id,
+            file_id=resolved_id,
+            file_title=file_title or filename,
+            pdf_path=str(save_path),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF 结构化索引失败: {e}")
 
 
 # ──────────────────────────── PDF Upload ────────────────────────────

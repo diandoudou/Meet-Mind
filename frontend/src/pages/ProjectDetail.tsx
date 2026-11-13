@@ -35,8 +35,8 @@ import { useFirebase } from '../context/FirebaseContext';
 import { doc, onSnapshot, collection, query, orderBy, getDocs, addDoc, deleteDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, storage } from '../firebase';
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
-import { GoogleGenAI } from '@google/genai';
 import { ProjectFile } from '../types';
+import { ragChat, indexPdfFile, type RagCitation } from '../services/ai';
 
 export default function ProjectDetail() {
   const { projectId } = useParams();
@@ -52,8 +52,8 @@ export default function ProjectDetail() {
   const [meetingDetailTab, setMeetingDetailTab] = useState<'summary' | 'actions' | 'transcript'>('summary');
 
   // AI Assistant state
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant', content: string }[]>([
-    { role: 'assistant', content: "Hi! I'm your project AI assistant. Ask me anything about this project's meetings, decisions, or action items." }
+  const [messages, setMessages] = useState<{ role: 'user' | 'assistant', content: string, citations?: RagCitation[] }[]>([
+    { role: 'assistant', content: "Hi! I'm your project AI assistant with RAG. Ask me anything about this project's meetings, decisions, or uploaded documents." }
   ]);
   const [aiInput, setAiInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -149,7 +149,7 @@ export default function ProjectDetail() {
         err => console.error('Upload error', err),
         async () => {
           const downloadURL = await getDownloadURL(task.snapshot.ref);
-          await addDoc(collection(db, 'projects', projectId, 'files'), {
+          const docRef = await addDoc(collection(db, 'projects', projectId, 'files'), {
             name: file.name,
             size: file.size,
             type: file.type,
@@ -159,6 +159,18 @@ export default function ProjectDetail() {
             uploadedBy: user.displayName || user.email || 'Unknown',
           });
           setUploadProgress(prev => { const n = { ...prev }; delete n[file.name]; return n; });
+
+          try {
+            await indexPdfFile({
+              file,
+              ownerUid: user.uid,
+              projectId,
+              fileId: docRef.id,
+              fileTitle: file.name,
+            });
+          } catch (indexErr) {
+            console.warn('RAG PDF index failed:', indexErr);
+          }
         }
       );
     });
@@ -201,38 +213,26 @@ export default function ProjectDetail() {
 
   const handleAiSend = async (e: FormEvent) => {
     e.preventDefault();
-    if (!aiInput.trim() || isTyping) return;
+    if (!aiInput.trim() || isTyping || !user || !projectId) return;
     const userMsg = aiInput.trim();
     setAiInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setIsTyping(true);
     try {
-      let context = `Project: ${project?.name}\nDescription: ${project?.description}\n\n`;
-      meetings.forEach(m => {
-        context += `Meeting: ${m.title} (${new Date(m.date).toLocaleDateString()})\nSummary: ${m.summary || 'N/A'}\n\n`;
+      const response = await ragChat({
+        message: userMsg,
+        ownerUid: user.uid,
+        projectId,
+        projectName: project?.name || '',
       });
-      actions.forEach(a => {
-        context += `Action Item: ${a.title} - Status: ${a.status}\n`;
-      });
-
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      if (!apiKey) {
-        setMessages(prev => [...prev, { role: 'assistant', content: "Gemini API key is not configured. Please set VITE_GEMINI_API_KEY in frontend/.env." }]);
-        return;
-      }
-
-      const ai = new GoogleGenAI({ apiKey });
-      const result = await ai.models.generateContent({
-        model: "gemini-2.0-flash-exp",
-        contents: userMsg,
-        config: {
-          systemInstruction: `You are an AI assistant for the project "${project?.name}". Answer questions based on the project context below. Be concise and helpful.\n\nContext:\n${context}`
-        }
-      });
-      setMessages(prev => [...prev, { role: 'assistant', content: result.text || "I couldn't process that request." }]);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: response.answer,
+        citations: response.citations,
+      }]);
     } catch (err) {
       console.error(err);
-      setMessages(prev => [...prev, { role: 'assistant', content: "Error retrieving project knowledge. Please check your API configuration." }]);
+      setMessages(prev => [...prev, { role: 'assistant', content: "Error retrieving project knowledge. Ensure the backend is running and meetings/PDFs are indexed." }]);
     } finally {
       setIsTyping(false);
     }
@@ -400,12 +400,29 @@ export default function ProjectDetail() {
                           {msg.role === 'assistant' ? <Sparkles size={15} /> : <User size={15} />}
                         </div>
                         <div className={cn(
-                          "max-w-[75%] px-5 py-4 rounded-2xl text-sm leading-relaxed",
+                          "max-w-[75%] px-5 py-4 rounded-2xl text-sm leading-relaxed space-y-3",
                           msg.role === 'assistant'
                             ? "bg-slate-50 text-slate-700 rounded-tl-none"
                             : "bg-academic-900 text-white rounded-tr-none font-medium"
                         )}>
-                          {msg.content}
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                          {msg.citations && msg.citations.length > 0 && (
+                            <div className="pt-2 border-t border-slate-200 space-y-2">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Sources</p>
+                              {msg.citations.map((cite) => (
+                                <button
+                                  key={cite.chunk_id}
+                                  type="button"
+                                  onClick={() => cite.url_path && navigate(cite.url_path)}
+                                  className="block w-full text-left p-2 bg-white border border-slate-100 rounded-xl hover:border-academic-900/20 transition-all"
+                                >
+                                  <span className="text-[10px] font-bold text-academic-900">{cite.label}</span>
+                                  <span className="text-[10px] text-slate-400 ml-2">{cite.source_title}</span>
+                                  <p className="text-[11px] text-slate-500 line-clamp-2 mt-1">{cite.excerpt}</p>
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </motion.div>
                     ))}

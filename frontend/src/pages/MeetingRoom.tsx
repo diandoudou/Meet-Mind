@@ -28,12 +28,12 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { TranscriptEntry, Project, ActionItem } from '../types';
-import { extractActionItems } from '../services/ai';
+import { extractActionItems, stopMeetingRecording } from '../services/ai';
 import { useFirebase } from '../context/FirebaseContext';
 import { collection, doc, setDoc, query, where, getDocs, limit, addDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 
-const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8765';
+const API_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_BACKEND_URL || 'http://localhost:8765';
 const WS_URL = `${API_URL.replace(/^http/, 'ws')}/ws`;
 
 export default function MeetingRoom() {
@@ -203,22 +203,22 @@ export default function MeetingRoom() {
       setAgentStatus('Stopping recording...');
 
       try {
-        const response = await fetch(`${API_URL}/stop`, { method: 'POST' });
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(errorText || 'Stop API failed');
-        }
-        const data = await response.json();
+        const data = await stopMeetingRecording({
+          projectId,
+          meetingId,
+          ownerUid: user?.uid,
+          meetingTitle: `Meeting ${new Date().toLocaleDateString()}`,
+        });
 
         setSummary(data.summary || 'No summary generated');
         
         // Use transcript from backend or fallback to local
         const finalTranscript = data.transcript && data.transcript.length > 0 
-          ? data.transcript.map((t: any) => ({
+          ? data.transcript.map((t) => ({
               speaker: t.speaker,
               text: t.text,
               timestamp: new Date(t.timestamp).getTime(),
-              language: t.language || 'mixed'
+              language: (t.language === 'zh' || t.language === 'en' || t.language === 'mixed' ? t.language : 'mixed') as 'zh' | 'en' | 'mixed'
             }))
           : transcript;
 
@@ -230,17 +230,29 @@ export default function MeetingRoom() {
           title: `Meeting ${new Date().toLocaleDateString()}`,
           date: Date.now(),
           summary: data.summary || '',
+          summaryStructured: data.summary_structured || null,
           transcript: finalTranscript,
           authorUid: user?.uid
         });
 
-        // Extract and save action items
-        const rawActions = await extractActionItems(finalTranscript, projectId, meetingId);
+        const backendActions = data.action_items || [];
+        const rawActions = backendActions.length > 0
+          ? backendActions
+          : await extractActionItems(finalTranscript, projectId, meetingId);
         for (const action of rawActions) {
           await addDoc(collection(db, 'projects', projectId, 'actionItems'), {
-            ...action,
+            projectId: action.projectId || projectId,
+            meetingId: action.meetingId || meetingId,
+            task: action.task,
+            assignee: action.assignee,
+            deadline: action.deadline,
+            status: action.status || 'pending',
             createdAt: Date.now()
           });
+        }
+
+        if (data.errors?.length) {
+          console.warn('[MeetingRoom] Post-meeting warnings:', data.errors);
         }
 
         setAgentStatus('Meeting saved');
